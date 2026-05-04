@@ -161,7 +161,8 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     service: 'ffmpeg-worker',
     timestamp: new Date().toISOString(),
-    version: '1.1.1'
+    version: '1.1.2',
+    public_base_url: PUBLIC_BASE_URL
   });
 });
 
@@ -257,7 +258,7 @@ app.use((_req, res) => {
 // ── Start ────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`[START] ffmpeg-worker v1.1.1 running on port ${PORT}`);
+  console.log(`[START] ffmpeg-worker v1.1.2 running on port ${PORT}`);
   console.log(`[START] Output dir: ${OUTPUT_DIR}`);
   console.log(`[START] Public base URL: ${PUBLIC_BASE_URL}`);
 });
