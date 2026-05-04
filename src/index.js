@@ -25,7 +25,7 @@ function requireApiKey(req, res, next) {
   const key = req.headers['x-api-key'];
   if (!key || key !== API_KEY) {
     console.warn(`[AUTH] Rejected request from ${req.ip} — invalid or missing x-api-key`);
-    return res.status(401).json({ error: 'Unauthorized: invalid x-api-key' });
+    return res.status(401).json({ success: false, error_code: 'UNAUTHORIZED', message: 'Invalid or missing x-api-key' });
   }
   next();
 }
@@ -33,7 +33,7 @@ function requireApiKey(req, res, next) {
 function requestLogger(req, res, next) {
   const start = Date.now();
   res.on('finish', () => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms)`);
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} => ${res.statusCode} (${Date.now() - start}ms)`);
   });
   next();
 }
@@ -63,6 +63,97 @@ const audioUpload = multer({
   }
 });
 
+// ── Payload normalization ───────────────────────────────────────────────────
+// Supports two incoming formats:
+//
+// Old (n8n current):  { VideoURL_1..4, VoiceURL, AudioURL, MusicStatus, durations[] }
+// New (future):       { voice_url, videos: [{segment_index, url, target_duration_seconds}],
+//                       durations[], publish_enabled, environment }
+//
+// Both are normalized to the same internal shape before validation.
+
+function normalizePayload(body) {
+  // Detect new format by presence of voice_url or videos array
+  if (body.voice_url || Array.isArray(body.videos)) {
+    const sorted = (body.videos || []).slice().sort(
+      (a, b) => (a.segment_index ?? 0) - (b.segment_index ?? 0)
+    );
+
+    const videoUrls = sorted.map(v => v.url || v.video_url || null);
+
+    // Use explicit durations[] if provided, else fall back to per-segment target_duration_seconds
+    let durations;
+    if (Array.isArray(body.durations) && body.durations.length === 4) {
+      durations = body.durations.map(Number);
+    } else {
+      const perSegment = sorted.map(v => parseFloat(v.target_duration_seconds));
+      durations = perSegment.every(n => !isNaN(n) && n > 0) ? perSegment : null;
+    }
+
+    return {
+      voiceUrl:      body.voice_url || null,
+      videoUrls,
+      durations,
+      audioUrl:      body.audio_url || body.AudioURL || null,
+      musicStatus:   body.music_status || body.MusicStatus || 'skipped',
+      publishEnabled: body.publish_enabled ?? false,
+      environment:   body.environment || 'production',
+      format:        'new'
+    };
+  }
+
+  // Old format
+  const videoUrls = [
+    body.VideoURL_1 || null,
+    body.VideoURL_2 || null,
+    body.VideoURL_3 || null,
+    body.VideoURL_4 || null
+  ];
+
+  let durations = null;
+  if (Array.isArray(body.durations) && body.durations.length === 4) {
+    durations = body.durations.map(Number);
+  }
+
+  return {
+    voiceUrl:      body.VoiceURL || null,
+    videoUrls,
+    durations,
+    audioUrl:      body.AudioURL || null,
+    musicStatus:   body.MusicStatus || 'skipped',
+    publishEnabled: false,
+    environment:   'production',
+    format:        'old'
+  };
+}
+
+function validatePayload(p) {
+  if (!p.voiceUrl) {
+    return { valid: false, error_code: 'INVALID_PAYLOAD', message: 'Missing required field: VoiceURL / voice_url' };
+  }
+  if (!Array.isArray(p.videoUrls) || p.videoUrls.length !== 4) {
+    return { valid: false, error_code: 'INVALID_PAYLOAD', message: `Expected 4 video URLs, got ${p.videoUrls?.length ?? 0}` };
+  }
+  const missing = p.videoUrls.map((u, i) => (!u ? `VideoURL_${i + 1}` : null)).filter(Boolean);
+  if (missing.length > 0) {
+    return { valid: false, error_code: 'INVALID_PAYLOAD', message: `Missing video URLs: ${missing.join(', ')}` };
+  }
+  const unique = new Set(p.videoUrls);
+  if (unique.size < 4) {
+    return {
+      valid: false,
+      error_code: 'INVALID_PAYLOAD',
+      message: `Duplicate video URLs detected (${unique.size} unique of 4 required). All 4 clips must be distinct.`
+    };
+  }
+  if (p.durations !== null) {
+    if (p.durations.some(isNaN) || p.durations.some(d => d <= 0)) {
+      return { valid: false, error_code: 'INVALID_PAYLOAD', message: 'durations must be 4 positive numbers (seconds per clip)' };
+    }
+  }
+  return { valid: true };
+}
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => {
@@ -70,26 +161,23 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     service: 'ffmpeg-worker',
     timestamp: new Date().toISOString(),
-    version: '1.1.0'
+    version: '1.1.1'
   });
 });
 
 app.post('/upload-audio', requireApiKey, audioUpload.single('audio'), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: 'No audio file received. Send field name: audio' });
+    return res.status(400).json({ success: false, error_code: 'INVALID_PAYLOAD', message: 'No audio file received. Send field name: audio' });
   }
 
   const VoiceURL = `${PUBLIC_BASE_URL}/output/audio/${req.file.filename}`;
-  console.log(`[UPLOAD] Audio saved → ${req.file.filename} (${(req.file.size / 1024).toFixed(0)} KB)`);
+  console.log(`[UPLOAD] Audio saved => ${req.file.filename} (${(req.file.size / 1024).toFixed(0)} KB)`);
 
-  // Measure voice duration immediately after save so the workflow can log it
-  // and validate before committing to the compose job.
   let voice_duration_seconds = null;
   try {
     voice_duration_seconds = await getDuration(req.file.path);
     console.log(`[UPLOAD] Voice duration: ${voice_duration_seconds.toFixed(3)}s`);
   } catch (err) {
-    // Non-fatal — compose will measure again internally
     console.warn(`[UPLOAD] Could not measure audio duration: ${err.message}`);
   }
 
@@ -99,57 +187,41 @@ app.post('/upload-audio', requireApiKey, audioUpload.single('audio'), async (req
 });
 
 app.post('/compose', requireApiKey, async (req, res) => {
-  const {
-    VideoURL_1, VideoURL_2, VideoURL_3, VideoURL_4,
-    VoiceURL, AudioURL, MusicStatus,
-    durations: reqDurations
-  } = req.body;
+  const normalized = normalizePayload(req.body);
+  const validation = validatePayload(normalized);
 
-  // ── Validate required fields ──────────────────────────────────────────────
-  const missing = [];
-  if (!VideoURL_1) missing.push('VideoURL_1');
-  if (!VideoURL_2) missing.push('VideoURL_2');
-  if (!VideoURL_3) missing.push('VideoURL_3');
-  if (!VideoURL_4) missing.push('VideoURL_4');
-  if (!VoiceURL)   missing.push('VoiceURL');
-
-  if (missing.length > 0) {
-    return res.status(400).json({ error: `Missing required fields: ${missing.join(', ')}` });
+  if (!validation.valid) {
+    console.warn(`[COMPOSE] Invalid payload (${normalized.format} format): ${validation.message}`);
+    return res.status(400).json({ success: false, error_code: validation.error_code, message: validation.message });
   }
 
-  // ── Validate and parse durations ──────────────────────────────────────────
-  // Durations should come from the n8n workflow (AI-generated segment durations).
-  // If missing or invalid, fall back to equal distribution over 30s.
-  let durations;
-  if (Array.isArray(reqDurations) && reqDurations.length === 4) {
-    durations = reqDurations.map(Number);
-    if (durations.some(isNaN) || durations.some(d => d <= 0)) {
-      return res.status(400).json({
-        error: 'durations must be an array of 4 positive numbers (seconds per clip)'
-      });
-    }
-  } else {
-    durations = [7.5, 7.5, 7.5, 7.5];
+  // Resolve final durations: validated array or default
+  const durations = (normalized.durations && !normalized.durations.some(isNaN) && normalized.durations.every(d => d > 0))
+    ? normalized.durations
+    : [7.5, 7.5, 7.5, 7.5];
+
+  if (!normalized.durations) {
     console.warn('[COMPOSE] No valid durations provided — using default [7.5, 7.5, 7.5, 7.5]');
   }
 
   console.log(
-    `[COMPOSE] New job — durations: [${durations.join(', ')}], ` +
-    `music: ${AudioURL ? 'yes' : 'no'}, MusicStatus: ${MusicStatus || 'skipped'}`
+    `[COMPOSE] New job (${normalized.format} format) — durations: [${durations.join(', ')}], ` +
+    `music: ${normalized.audioUrl ? 'yes' : 'no'}, MusicStatus: ${normalized.musicStatus}, ` +
+    `env: ${normalized.environment}, publish: ${normalized.publishEnabled}`
   );
 
   try {
     const result = await compose({
-      videoUrls: [VideoURL_1, VideoURL_2, VideoURL_3, VideoURL_4],
+      videoUrls: normalized.videoUrls,
       durations,
-      voiceUrl:  VoiceURL,
-      audioUrl:  AudioURL || null,
+      voiceUrl:  normalized.voiceUrl,
+      audioUrl:  normalized.audioUrl || null,
       outputDir: OUTPUT_DIR
     });
 
     const FinalVideoURL = `${PUBLIC_BASE_URL}/output/${result.filename}`;
     console.log(
-      `[COMPOSE] Job ${result.jobId} complete → ${FinalVideoURL} ` +
+      `[COMPOSE] Job ${result.jobId} complete => ${FinalVideoURL} ` +
       `| voice=${result.voice_duration_seconds.toFixed(2)}s ` +
       `| total=${result.total_duration.toFixed(2)}s`
     );
@@ -157,7 +229,9 @@ app.post('/compose', requireApiKey, async (req, res) => {
     scheduleCleanup(path.join(OUTPUT_DIR, result.filename));
 
     return res.json({
-      FinalVideoURL,
+      success:                true,
+      final_video_url:        FinalVideoURL,
+      FinalVideoURL,                          // backward compatibility
       jobId:                  result.jobId,
       voice_duration_seconds: result.voice_duration_seconds,
       total_duration:         result.total_duration,
@@ -167,22 +241,23 @@ app.post('/compose', requireApiKey, async (req, res) => {
 
   } catch (err) {
     console.error(`[COMPOSE] Error:`, err.message);
-    // CLIP_TOO_SHORT is a known validation error (422 Unprocessable Entity)
-    const statusCode = err.message.startsWith('CLIP_TOO_SHORT') ? 422 : 500;
-    return res.status(statusCode).json({ error: err.message });
+    if (err.message.startsWith('CLIP_TOO_SHORT')) {
+      return res.status(422).json({ success: false, error_code: 'CLIP_TOO_SHORT', message: err.message });
+    }
+    return res.status(500).json({ success: false, error_code: 'INTERNAL_ERROR', message: err.message });
   }
 });
 
 // ── 404 ─────────────────────────────────────────────────────────────────────
 
 app.use((_req, res) => {
-  res.status(404).json({ error: 'Not found' });
+  res.status(404).json({ success: false, error_code: 'NOT_FOUND', message: 'Not found' });
 });
 
 // ── Start ────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`[START] ffmpeg-worker v1.1.0 running on port ${PORT}`);
+  console.log(`[START] ffmpeg-worker v1.1.1 running on port ${PORT}`);
   console.log(`[START] Output dir: ${OUTPUT_DIR}`);
   console.log(`[START] Public base URL: ${PUBLIC_BASE_URL}`);
 });
