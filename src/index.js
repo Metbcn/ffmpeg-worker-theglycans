@@ -162,7 +162,7 @@ app.get('/health', (_req, res) => {
     service: 'ffmpeg-worker',
     timestamp: new Date().toISOString(),
     version: '1.1.2',
-    public_base_url: PUBLIC_BASE_URL
+    public_base_url: process.env.PUBLIC_BASE_URL || null
   });
 });
 
