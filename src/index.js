@@ -177,7 +177,9 @@ app.get('/health', (_req, res) => {
     service: 'ffmpeg-worker',
     timestamp: new Date().toISOString(),
     version: '2.0.0',
-    public_base_url: process.env.PUBLIC_BASE_URL || null
+    public_base_url: process.env.PUBLIC_BASE_URL || null,
+    build_commit: '8ff8697',
+    drawtext_ascii_fix: true
   });
 });
 
