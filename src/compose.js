@@ -121,24 +121,35 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
     console.log(`[${jobId}] Clip total: ${totalClipContent.toFixed(3)}s  Voice: ${measuredVoiceDur.toFixed(3)}s`);
 
     // ── 4. Validate: clips must cover voice (or fill gap by looping) ───────
-    // Coverage ≥ 50%: fill the gap by cycling clips from their beginning.
-    // Coverage < 50%: too repetitive to recover → abort.
-    const LOOP_FILL_RATIO = 0.50;
+    // Loop fill is allowed when: coverage >= 85% OR gap <= 8s.
+    // If both conditions fail → abort (gap too large and coverage too low).
+    const LOOP_FILL_MIN_COVERAGE = 0.85; // 85%
+    const LOOP_FILL_MAX_GAP_S    = 8.0;  // seconds
     let loopSegs = []; // { clipIdx, duration, label }
 
+    const gap0     = measuredVoiceDur - totalClipContent;
+    const coverage = totalClipContent / measuredVoiceDur;
+
+    console.log(`[${jobId}] available_video_duration: ${totalClipContent.toFixed(3)}s`);
+    console.log(`[${jobId}] voice_duration:           ${measuredVoiceDur.toFixed(3)}s`);
+    console.log(`[${jobId}] gap:                      ${gap0.toFixed(3)}s`);
+    console.log(`[${jobId}] coverage:                 ${(coverage * 100).toFixed(1)}%`);
+
     if (totalClipContent < measuredVoiceDur - FREEZE_TOLERANCE_S) {
-      const ratio = totalClipContent / measuredVoiceDur;
-      if (ratio < LOOP_FILL_RATIO) {
+      const canLoop = coverage >= LOOP_FILL_MIN_COVERAGE || gap0 <= LOOP_FILL_MAX_GAP_S;
+
+      if (!canLoop) {
+        console.log(`[${jobId}] loop_fill_applied: false — coverage ${(coverage * 100).toFixed(1)}% < 85% AND gap ${gap0.toFixed(2)}s > 8s`);
         throw new Error(
           `CLIP_TOO_SHORT: available clip content (${totalClipContent.toFixed(2)}s) ` +
-          `cannot cover voice (${measuredVoiceDur.toFixed(2)}s) — ` +
-          `${(ratio * 100).toFixed(0)}% coverage is below the 50% minimum. ` +
+          `cannot cover voice (${measuredVoiceDur.toFixed(2)}s). ` +
+          `Gap: ${gap0.toFixed(2)}s, coverage: ${(coverage * 100).toFixed(1)}%. ` +
+          `Loop fill requires coverage ≥ 85% or gap ≤ 8s. ` +
           `Measured clip durations: [${measuredClipDurs.map(d => d.toFixed(2)).join(', ')}]s. Aborting.`
         );
       }
 
-      let gap = measuredVoiceDur - totalClipContent;
-      console.log(`[${jobId}] Clip gap ${gap.toFixed(3)}s (${(ratio * 100).toFixed(1)}% coverage) — filling by looping clips`);
+      let gap = gap0;
       let iter = 0;
       while (gap > 0.05 && iter < 20) {
         const ci = iter % 4;
@@ -147,7 +158,13 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
         gap -= take;
         iter++;
       }
-      console.log(`[${jobId}] Loop fill: [${loopSegs.map(s => `clip${s.clipIdx + 1}:${s.duration.toFixed(2)}s`).join(', ')}]`);
+
+      const extraAdded = loopSegs.reduce((a, s) => a + s.duration, 0);
+      console.log(`[${jobId}] loop_fill_applied:          true`);
+      console.log(`[${jobId}] source_clip_used_for_loop:  ${loopSegs.map(s => `clip${s.clipIdx + 1}`).join(', ')}`);
+      console.log(`[${jobId}] extra_duration_added:       ${extraAdded.toFixed(3)}s`);
+    } else {
+      console.log(`[${jobId}] loop_fill_applied: false — clips cover voice (no gap)`);
     }
 
     const targetDuration = parseFloat(measuredVoiceDur.toFixed(3));
