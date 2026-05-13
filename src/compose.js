@@ -120,14 +120,34 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
     console.log(`[${jobId}] Effective: [${effectiveDurs.map(d => d.toFixed(3)).join(', ')}]s`);
     console.log(`[${jobId}] Clip total: ${totalClipContent.toFixed(3)}s  Voice: ${measuredVoiceDur.toFixed(3)}s`);
 
-    // ── 4. Validate: clips must cover voice ────────────────────────────────
+    // ── 4. Validate: clips must cover voice (or fill gap by looping) ───────
+    // Coverage ≥ 50%: fill the gap by cycling clips from their beginning.
+    // Coverage < 50%: too repetitive to recover → abort.
+    const LOOP_FILL_RATIO = 0.50;
+    let loopSegs = []; // { clipIdx, duration, label }
+
     if (totalClipContent < measuredVoiceDur - FREEZE_TOLERANCE_S) {
-      throw new Error(
-        `CLIP_TOO_SHORT: available clip content (${totalClipContent.toFixed(2)}s) ` +
-        `cannot cover voice (${measuredVoiceDur.toFixed(2)}s). ` +
-        `Measured clip durations: [${measuredClipDurs.map(d => d.toFixed(2)).join(', ')}]s. ` +
-        `Video would freeze on last frame. Aborting.`
-      );
+      const ratio = totalClipContent / measuredVoiceDur;
+      if (ratio < LOOP_FILL_RATIO) {
+        throw new Error(
+          `CLIP_TOO_SHORT: available clip content (${totalClipContent.toFixed(2)}s) ` +
+          `cannot cover voice (${measuredVoiceDur.toFixed(2)}s) — ` +
+          `${(ratio * 100).toFixed(0)}% coverage is below the 50% minimum. ` +
+          `Measured clip durations: [${measuredClipDurs.map(d => d.toFixed(2)).join(', ')}]s. Aborting.`
+        );
+      }
+
+      let gap = measuredVoiceDur - totalClipContent;
+      console.log(`[${jobId}] Clip gap ${gap.toFixed(3)}s (${(ratio * 100).toFixed(1)}% coverage) — filling by looping clips`);
+      let iter = 0;
+      while (gap > 0.05 && iter < 20) {
+        const ci = iter % 4;
+        const take = parseFloat(Math.min(measuredClipDurs[ci], gap).toFixed(3));
+        loopSegs.push({ clipIdx: ci, duration: take, label: `lv${iter}` });
+        gap -= take;
+        iter++;
+      }
+      console.log(`[${jobId}] Loop fill: [${loopSegs.map(s => `clip${s.clipIdx + 1}:${s.duration.toFixed(2)}s`).join(', ')}]`);
     }
 
     const targetDuration = parseFloat(measuredVoiceDur.toFixed(3));
@@ -140,11 +160,11 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
     try {
       ffmpegArgs = buildStyledFFmpegArgs({
         jobDir, effectiveDurs, measuredClipDurs, targetDuration,
-        hasMusic: !!audioUrl, outputFile, style
+        hasMusic: !!audioUrl, outputFile, style, loopSegs
       });
     } catch (buildErr) {
       console.warn(`[${jobId}] FALLBACK (filter build): ${buildErr.message}`);
-      ffmpegArgs = buildSimpleFFmpegArgs({ jobDir, effectiveDurs, targetDuration, hasMusic: !!audioUrl, outputFile });
+      ffmpegArgs = buildSimpleFFmpegArgs({ jobDir, effectiveDurs, loopSegs, targetDuration, hasMusic: !!audioUrl, outputFile });
       usedFallback = true;
     }
 
@@ -183,7 +203,7 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
 
 // ── Simple fallback renderer (no style) ─────────────────────────────────────
 // Identical to the original v1.x buildFFmpegArgs.
-function buildSimpleFFmpegArgs({ jobDir, effectiveDurs, targetDuration, hasMusic, outputFile }) {
+function buildSimpleFFmpegArgs({ jobDir, effectiveDurs, loopSegs = [], targetDuration, hasMusic, outputFile }) {
   const inputs = [];
   for (let i = 0; i < 4; i++) inputs.push('-i', path.join(jobDir, `clip_${i + 1}.mp4`));
   inputs.push('-i', path.join(jobDir, 'voice.mp3'));
@@ -198,6 +218,16 @@ function buildSimpleFFmpegArgs({ jobDir, effectiveDurs, targetDuration, hasMusic
     `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1[v${i}]`
   ).join('; ');
 
+  const loopFilters = loopSegs.map(({ clipIdx, duration, label }) =>
+    `[${clipIdx}:v]trim=0:${duration},setpts=PTS-STARTPTS,` +
+    `scale=1080:1920:force_original_aspect_ratio=decrease,` +
+    `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1[${label}]`
+  ).join('; ');
+
+  const totalSegs = 4 + loopSegs.length;
+  const loopLabels = loopSegs.map(s => `[${s.label}]`).join('');
+  const concatFilter = `[v0][v1][v2][v3]${loopLabels}concat=n=${totalSegs}:v=1:a=0[vout]`;
+
   let audioFilter;
   if (hasMusic) {
     audioFilter =
@@ -209,8 +239,8 @@ function buildSimpleFFmpegArgs({ jobDir, effectiveDurs, targetDuration, hasMusic
       `[${voiceIdx}:a]apad=pad_dur=${targetDuration},atrim=0:${targetDuration},volume=1.0[aout]`;
   }
 
-  const filterComplex =
-    `${vFilters}; [v0][v1][v2][v3]concat=n=4:v=1:a=0[vout]; ${audioFilter}`;
+  const allVFilters = loopFilters ? `${vFilters}; ${loopFilters}` : vFilters;
+  const filterComplex = `${allVFilters}; ${concatFilter}; ${audioFilter}`;
 
   return [
     ...inputs,
@@ -226,7 +256,7 @@ function buildSimpleFFmpegArgs({ jobDir, effectiveDurs, targetDuration, hasMusic
 
 // ── Styled renderer (FASE 6A + 6B + 6C) ─────────────────────────────────────
 
-function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, targetDuration, hasMusic, outputFile, style }) {
+function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, targetDuration, hasMusic, outputFile, style, loopSegs = [] }) {
   // ── FASE 6B: zoom multiplier ──────────────────────────────────────────────
   const zoomMult   = resolveZoom(style.motion_style.zoom_intensity);
   const applyZoom  = zoomMult > 1.005;
@@ -327,10 +357,28 @@ function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, target
     joinFilter = `[v0][v1][v2][v3]concat=n=4:v=1:a=0[vmerged]`;
   }
 
+  // ── Loop fill segments (when clips shorter than voice) ───────────────────
+  let loopVFilters = '';
+  let afterLoopsLabel = '[vmerged]';
+  if (loopSegs.length > 0) {
+    const lfs = loopSegs.map(({ clipIdx, duration, label }) => {
+      let f = `[${clipIdx}:v]trim=0:${duration},setpts=PTS-STARTPTS,`;
+      f += `scale=1080:1920:force_original_aspect_ratio=decrease,`;
+      f += `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1`;
+      if (eqFilter) f += `,${eqFilter}`;
+      f += `[${label}]`;
+      return f;
+    });
+    const loopLabels = loopSegs.map(s => `[${s.label}]`).join('');
+    afterLoopsLabel = '[vlooped]';
+    loopVFilters = `; ${lfs.join('; ')}; [vmerged]${loopLabels}concat=n=${1 + loopSegs.length}:v=1:a=0[vlooped]`;
+    console.log(`[STYLED] Loop fill: ${loopSegs.length} segment(s) appended`);
+  }
+
   // ── FASE 6A — CTA text overlay ────────────────────────────────────────────
   const ctaText = escapeDrawtext(style.cta_style.text_overlay || '');
   let ctaFilter    = '';
-  let finalVLabel  = '[vmerged]';
+  let finalVLabel  = afterLoopsLabel;
 
   if (ctaText.length > 0) {
     const fontSize  = resolveFontSize(style.subtitle_style.font_style);
@@ -338,7 +386,7 @@ function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, target
     // CTA starts at 75% of video duration or 4s before end, whichever is later
     const ctaStart  = Math.max(targetDuration - 4.0, targetDuration * 0.75).toFixed(2);
     ctaFilter =
-      `; [vmerged]drawtext=` +
+      `; ${afterLoopsLabel}drawtext=` +
       `fontfile=${FONT_FILE}:` +
       `text='${ctaText}':` +
       `fontsize=${fontSize}:` +
@@ -375,6 +423,7 @@ function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, target
   const filterComplex =
     `${vFilters}; ` +
     `${joinFilter}` +
+    `${loopVFilters}` +
     `${ctaFilter}; ` +
     audioFilter;
 
