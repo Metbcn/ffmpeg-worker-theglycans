@@ -9,9 +9,11 @@ const {
   mergeStyleConfig,
   resolveZoom,
   clampMusicVolume,
+  cleanCtaText,
   escapeDrawtext,
   resolveSubtitlePosition,
   resolveFontSize,
+  getCropPosition,
   resolveEqParams,
   resolveTransitionType,
   FONT_FILE
@@ -64,7 +66,8 @@ function getDuration(filePath) {
 // styleProfile: string label (e.g. 'scientific_clean')
 // styleConfig:  raw style_config object from the n8n payload (or null/undefined)
 
-async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, styleProfile, styleConfig }) {
+async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, styleProfile, styleConfig,
+                          subtitlesEnabled = false, subtitleMode = 'approximate', subtitleText = '' }) {
   const jobId = uuidv4();
   const jobDir = path.join(TEMP_DIR, jobId);
   fs.mkdirSync(jobDir, { recursive: true });
@@ -81,6 +84,7 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
   console.log(`[${jobId}] sound_style: music_volume=${style.sound_style.music_volume}`);
   console.log(`[${jobId}] transition_style: type=${style.transition_style.type}`);
   console.log(`[${jobId}] cta_style: text="${style.cta_style.text_overlay}"`);
+  console.log(`[${jobId}] subtitles: ${subtitlesEnabled ? `enabled (${subtitleMode}, ${subtitleText.trim().split(/\s+/).length} words)` : 'disabled'}`);
   console.log(`[${jobId}] Declared durations: [${durations.join(', ')}]s`);
 
   try {
@@ -177,7 +181,8 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
     try {
       ffmpegArgs = buildStyledFFmpegArgs({
         jobDir, effectiveDurs, measuredClipDurs, targetDuration,
-        hasMusic: !!audioUrl, outputFile, style, loopSegs
+        hasMusic: !!audioUrl, outputFile, style, loopSegs,
+        subtitlesEnabled, subtitleMode, subtitleText
       });
     } catch (buildErr) {
       console.warn(`[${jobId}] FALLBACK (filter build): ${buildErr.message}`);
@@ -216,6 +221,46 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
     fs.rmSync(jobDir, { recursive: true, force: true });
     console.log(`[${jobId}] Temp files cleaned`);
   }
+}
+
+// ── FASE 6D-LITE: Approximate subtitle filter chain ──────────────────────────
+// Splits guion text into equal-duration chunks and renders each via drawtext.
+// Uses 10 words/chunk (max 15 chunks) to keep the filter chain manageable.
+// Positioned at y=h-text_h-220 so it never overlaps the CTA (at h-text_h-80).
+function buildSubtitleFilters({ text, voiceDuration, fontFile, fontStyle, inputLabel }) {
+  const words = text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  if (words.length < 3) return { filterChain: '', outputLabel: inputLabel };
+
+  const WORDS_PER_CHUNK = 10;
+  const MAX_CHUNKS      = 15;
+  const allChunks = [];
+  for (let i = 0; i < words.length; i += WORDS_PER_CHUNK) {
+    allChunks.push(words.slice(i, i + WORDS_PER_CHUNK).join(' '));
+  }
+  const chunks   = allChunks.slice(0, MAX_CHUNKS);
+  const chunkDur = voiceDuration / chunks.length;
+  const fontSize = Math.max(34, (resolveFontSize(fontStyle) || 48) - 14);
+
+  const parts = [];
+  let prevLabel = inputLabel;
+
+  chunks.forEach((chunk, i) => {
+    const safe = escapeDrawtext(chunk);
+    if (!safe) return;
+    const start     = parseFloat((i * chunkDur).toFixed(2));
+    const end       = parseFloat(Math.min((i + 1) * chunkDur, voiceDuration).toFixed(2));
+    const nextLabel = i === chunks.length - 1 ? '[vwithsubs]' : `[sub${i}]`;
+    parts.push(
+      `${prevLabel}drawtext=fontfile=${fontFile}:text='${safe}':fontsize=${fontSize}:` +
+      `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=10:` +
+      `x=(w-text_w)/2:y=h-text_h-220:` +
+      `enable='between(t,${start},${end})'${nextLabel}`
+    );
+    prevLabel = nextLabel;
+  });
+
+  if (parts.length === 0) return { filterChain: '', outputLabel: inputLabel };
+  return { filterChain: '; ' + parts.join('; '), outputLabel: prevLabel };
 }
 
 // ── Simple fallback renderer (no style) ─────────────────────────────────────
@@ -273,7 +318,8 @@ function buildSimpleFFmpegArgs({ jobDir, effectiveDurs, loopSegs = [], targetDur
 
 // ── Styled renderer (FASE 6A + 6B + 6C) ─────────────────────────────────────
 
-function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, targetDuration, hasMusic, outputFile, style, loopSegs = [] }) {
+function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, targetDuration, hasMusic, outputFile, style, loopSegs = [],
+                                  subtitlesEnabled = false, subtitleMode = 'approximate', subtitleText = '' }) {
   // ── FASE 6B: zoom multiplier ──────────────────────────────────────────────
   const zoomMult   = resolveZoom(style.motion_style.zoom_intensity);
   const applyZoom  = zoomMult > 1.005;
@@ -322,17 +368,16 @@ function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, target
     f += `scale=1080:1920:force_original_aspect_ratio=decrease,`;
     f += `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1`;
 
-    // FASE 6B — subtle Ken Burns: scale up then animate crop position
+    // FASE 6.1 — directional Ken Burns: each clip uses a distinct corner anchor
+    // Clip 0: TL→center, Clip 1: TR→center, Clip 2: BL→center, Clip 3: BR→center
     if (applyZoom) {
-      // Keep dimensions even (required by libx264)
-      const sw       = Math.round(1080 * zoomMult / 2) * 2;
+      const sw       = Math.round(1080 * zoomMult / 2) * 2; // even dimensions
       const sh       = Math.round(1920 * zoomMult / 2) * 2;
-      const halfOffX = (sw - 1080) / 2; // constant, computed in JS
+      const halfOffX = (sw - 1080) / 2;
       const halfOffY = (sh - 1920) / 2;
-      // Crop position animates from (0,0) toward center (halfOffX, halfOffY),
-      // creating a "zoom-in from edge toward center" pan effect.
+      const cropPos  = getCropPosition(i, halfOffX, halfOffY, dur);
       f += `,scale=${sw}:${sh}`;
-      f += `,crop=1080:1920:'${halfOffX}*t/${dur}':'${halfOffY}*t/${dur}',setsar=1`;
+      f += `,crop=1080:1920:'${cropPos.x}':'${cropPos.y}',setsar=1`;
     }
 
     // FASE 6A — visual identity: contrast / brightness / saturation
@@ -392,28 +437,55 @@ function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, target
     console.log(`[STYLED] Loop fill: ${loopSegs.length} segment(s) appended`);
   }
 
-  // ── FASE 6A — CTA text overlay ────────────────────────────────────────────
-  const ctaText = escapeDrawtext(style.cta_style.text_overlay || '');
+  // ── FASE 6D-LITE — Approximate subtitles ────────────────────────────────────
+  let subFilterChain = '';
+  let afterSubsLabel = afterLoopsLabel;
+
+  if (subtitlesEnabled && subtitleText && subtitleText.trim().length > 10) {
+    try {
+      const subResult = buildSubtitleFilters({
+        text:          subtitleText,
+        voiceDuration: targetDuration,
+        fontFile:      FONT_FILE,
+        fontStyle:     style.subtitle_style.font_style,
+        inputLabel:    afterLoopsLabel
+      });
+      if (subResult.filterChain) {
+        subFilterChain = subResult.filterChain;
+        afterSubsLabel = subResult.outputLabel;
+        console.log(`[STYLED] Subtitles: ${subtitleText.trim().split(/\s+/).length} words → ${subResult.filterChain.split('; ').length - 1} chunks over ${targetDuration.toFixed(1)}s`);
+      }
+    } catch (subErr) {
+      console.warn(`[STYLED] Subtitle filter build failed: ${subErr.message} — skipping subtitles`);
+    }
+  } else {
+    console.log('[STYLED] Subtitles: disabled or no text');
+  }
+
+  // ── FASE 6.1 — CTA text overlay (improved visibility) ────────────────────
+  // cleanCtaText detects encoding corruption (? inside words) before escaping.
+  const ctaRaw  = cleanCtaText(style.cta_style.text_overlay || '');
+  const ctaText = escapeDrawtext(ctaRaw);
   let ctaFilter    = '';
-  let finalVLabel  = afterLoopsLabel;
+  let finalVLabel  = afterSubsLabel;
 
   if (ctaText.length > 0) {
-    const fontSize  = resolveFontSize(style.subtitle_style.font_style);
+    const fontSize  = resolveFontSize(style.subtitle_style.font_style) + 4;
     const pos       = resolveSubtitlePosition(style.subtitle_style.position);
-    // CTA starts at 75% of video duration or 4s before end, whichever is later
-    const ctaStart  = Math.max(targetDuration - 4.0, targetDuration * 0.75).toFixed(2);
+    // CTA: last 4s or last 20% of video, whichever is longer
+    const ctaStart  = Math.max(targetDuration - 4.0, targetDuration * 0.80).toFixed(2);
     ctaFilter =
-      `; ${afterLoopsLabel}drawtext=` +
+      `; ${afterSubsLabel}drawtext=` +
       `fontfile=${FONT_FILE}:` +
       `text='${ctaText}':` +
       `fontsize=${fontSize}:` +
       `fontcolor=white:` +
-      `box=1:boxcolor=black@0.55:boxborderw=12:` +
+      `box=1:boxcolor=black@0.70:boxborderw=18:` +
       `x=${pos.x}:y=${pos.y}:` +
       `enable='gte(t,${ctaStart})'` +
       `[vout]`;
     finalVLabel = '[vout]';
-    console.log(`[STYLED] CTA overlay applied: "${ctaText}" @ t>=${ctaStart}s`);
+    console.log(`[STYLED] CTA overlay: "${ctaText}" @ t>=${ctaStart}s (font+4, box 70%)`);
   } else {
     console.log('[STYLED] CTA skipped: no text_overlay');
   }
@@ -441,6 +513,7 @@ function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, target
     `${vFilters}; ` +
     `${joinFilter}` +
     `${loopVFilters}` +
+    `${subFilterChain}` +
     `${ctaFilter}; ` +
     audioFilter;
 

@@ -96,16 +96,19 @@ function normalizePayload(body) {
     }
 
     return {
-      voiceUrl:       body.voice_url || null,
+      voiceUrl:         body.voice_url || null,
       videoUrls,
       durations,
-      audioUrl:       body.audio_url || body.AudioURL || null,
-      musicStatus:    body.music_status || body.MusicStatus || 'skipped',
-      publishEnabled: body.publish_enabled ?? false,
-      environment:    body.environment || 'production',
+      audioUrl:         body.audio_url || body.AudioURL || null,
+      musicStatus:      body.music_status || body.MusicStatus || 'skipped',
+      publishEnabled:   body.publish_enabled ?? false,
+      environment:      body.environment || 'production',
       styleProfile,
       styleConfig,
-      format:         'new'
+      subtitlesEnabled: body.subtitles_enabled ?? false,
+      subtitleMode:     body.subtitle_mode || 'approximate',
+      subtitleText:     body.subtitle_text || '',
+      format:           'new'
     };
   }
 
@@ -123,16 +126,19 @@ function normalizePayload(body) {
   }
 
   return {
-    voiceUrl:       body.VoiceURL || null,
+    voiceUrl:         body.VoiceURL || null,
     videoUrls,
     durations,
-    audioUrl:       body.AudioURL || null,
-    musicStatus:    body.MusicStatus || 'skipped',
-    publishEnabled: false,
-    environment:    'production',
+    audioUrl:         body.AudioURL || null,
+    musicStatus:      body.MusicStatus || 'skipped',
+    publishEnabled:   false,
+    environment:      'production',
     styleProfile,
     styleConfig,
-    format:         'old'
+    subtitlesEnabled: false,
+    subtitleMode:     'approximate',
+    subtitleText:     '',
+    format:           'old'
   };
 }
 
@@ -223,13 +229,16 @@ app.post('/compose', requireApiKey, async (req, res) => {
 
   try {
     const result = await compose({
-      videoUrls:    normalized.videoUrls,
+      videoUrls:        normalized.videoUrls,
       durations,
-      voiceUrl:     normalized.voiceUrl,
-      audioUrl:     normalized.audioUrl || null,
-      outputDir:    OUTPUT_DIR,
-      styleProfile: normalized.styleProfile,
-      styleConfig:  normalized.styleConfig
+      voiceUrl:         normalized.voiceUrl,
+      audioUrl:         normalized.audioUrl || null,
+      outputDir:        OUTPUT_DIR,
+      styleProfile:     normalized.styleProfile,
+      styleConfig:      normalized.styleConfig,
+      subtitlesEnabled: normalized.subtitlesEnabled,
+      subtitleMode:     normalized.subtitleMode,
+      subtitleText:     normalized.subtitleText
     });
 
     const FinalVideoURL = `${PUBLIC_BASE_URL}/output/${result.filename}`;

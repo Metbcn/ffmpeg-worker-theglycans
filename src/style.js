@@ -59,17 +59,18 @@ function mergeStyleConfig(received) {
 
 // ── FASE 6B: Zoom resolution ─────────────────────────────────────────────────
 // Maps string labels to numeric multipliers. Spec: min 1.00, max 1.08.
+// Updated FASE 6.1: values increased for more visible motion.
 const ZOOM_MAP = {
   'static':      1.00,
-  'low':         1.02,
-  'medium_low':  1.03,
-  'slow_drift':  1.02,
-  'slow_zoom':   1.03,
-  'gentle_zoom': 1.03,
-  'medium_slow': 1.03,
-  'medium':      1.04,
-  'push_in':     1.05,
-  'high':        1.06
+  'low':         1.03,
+  'medium_low':  1.04,
+  'slow_drift':  1.03,
+  'slow_zoom':   1.04,
+  'gentle_zoom': 1.04,
+  'medium_slow': 1.04,
+  'medium':      1.06,
+  'push_in':     1.07,
+  'high':        1.08
 };
 
 function resolveZoom(zoom_intensity) {
@@ -159,16 +160,46 @@ function resolveTransitionType(type) {
 // Font file used for drawtext. DejaVu is installed in the Dockerfile.
 const FONT_FILE = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
 
+// ── FASE 6.1: CTA text cleaning ──────────────────────────────────────────────
+// Detects encoding corruption (? inside words) and returns a safe fallback.
+const FALLBACK_CTA = 'Sigueme para mas ideas';
+
+function cleanCtaText(text) {
+  if (!text || typeof text !== 'string') return '';
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+  // ? between word characters = corrupted UTF-8 accent char (e.g. S?gueme → Sígueme broken)
+  if (/\w\?\w/.test(trimmed)) return FALLBACK_CTA;
+  return trimmed;
+}
+
+// ── FASE 6.1: Directional Ken Burns crop position ────────────────────────────
+// Each clip uses a different corner as anchor point so adjacent clips
+// have visually distinct movement directions.
+// pattern: 0=TL→center, 1=TR→center, 2=BL→center, 3=BR→center
+function getCropPosition(clipIdx, halfOffX, halfOffY, dur) {
+  switch (clipIdx % 4) {
+    case 0: return { x: `${halfOffX}*t/${dur}`,             y: `${halfOffY}*t/${dur}` };
+    case 1: return { x: `${halfOffX}-${halfOffX}*t/${dur}`, y: `${halfOffY}*t/${dur}` };
+    case 2: return { x: `${halfOffX}*t/${dur}`,             y: `${halfOffY}-${halfOffY}*t/${dur}` };
+    case 3: return { x: `${halfOffX}-${halfOffX}*t/${dur}`, y: `${halfOffY}-${halfOffY}*t/${dur}` };
+    default: return { x: `${halfOffX}*t/${dur}`,            y: `${halfOffY}*t/${dur}` };
+  }
+}
+
 module.exports = {
   getDefaultStyleConfig,
   mergeStyleConfig,
   resolveZoom,
   clampMusicVolume,
+  cleanCtaText,
   escapeDrawtext,
   resolveSubtitlePosition,
   resolveFontSize,
+  getCropPosition,
   resolveEqParams,
   resolveTransitionType,
   SAFE_XFADE_TYPES,
-  FONT_FILE
+  FONT_FILE,
+  FALLBACK_CTA
 };
