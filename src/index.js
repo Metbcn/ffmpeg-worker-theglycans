@@ -67,12 +67,17 @@ const audioUpload = multer({
 // Supports two incoming formats:
 //
 // Old (n8n current):  { VideoURL_1..4, VoiceURL, AudioURL, MusicStatus, durations[] }
-// New (future):       { voice_url, videos: [{segment_index, url, target_duration_seconds}],
-//                       durations[], publish_enabled, environment }
+// New (current):      { voice_url, videos: [{segment_index, url, target_duration_seconds}],
+//                       durations[], style_profile, style_config, publish_enabled, environment }
 //
 // Both are normalized to the same internal shape before validation.
+// style_profile and style_config are always forwarded regardless of format.
 
 function normalizePayload(body) {
+  // Style fields are format-independent
+  const styleProfile = body.style_profile || null;
+  const styleConfig  = body.style_config  || null;
+
   // Detect new format by presence of voice_url or videos array
   if (body.voice_url || Array.isArray(body.videos)) {
     const sorted = (body.videos || []).slice().sort(
@@ -91,18 +96,20 @@ function normalizePayload(body) {
     }
 
     return {
-      voiceUrl:      body.voice_url || null,
+      voiceUrl:       body.voice_url || null,
       videoUrls,
       durations,
-      audioUrl:      body.audio_url || body.AudioURL || null,
-      musicStatus:   body.music_status || body.MusicStatus || 'skipped',
+      audioUrl:       body.audio_url || body.AudioURL || null,
+      musicStatus:    body.music_status || body.MusicStatus || 'skipped',
       publishEnabled: body.publish_enabled ?? false,
-      environment:   body.environment || 'production',
-      format:        'new'
+      environment:    body.environment || 'production',
+      styleProfile,
+      styleConfig,
+      format:         'new'
     };
   }
 
-  // Old format
+  // Old format (no style_config expected, but accepted if present)
   const videoUrls = [
     body.VideoURL_1 || null,
     body.VideoURL_2 || null,
@@ -116,14 +123,16 @@ function normalizePayload(body) {
   }
 
   return {
-    voiceUrl:      body.VoiceURL || null,
+    voiceUrl:       body.VoiceURL || null,
     videoUrls,
     durations,
-    audioUrl:      body.AudioURL || null,
-    musicStatus:   body.MusicStatus || 'skipped',
+    audioUrl:       body.AudioURL || null,
+    musicStatus:    body.MusicStatus || 'skipped',
     publishEnabled: false,
-    environment:   'production',
-    format:        'old'
+    environment:    'production',
+    styleProfile,
+    styleConfig,
+    format:         'old'
   };
 }
 
@@ -161,7 +170,7 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     service: 'ffmpeg-worker',
     timestamp: new Date().toISOString(),
-    version: '1.1.2',
+    version: '2.0.0',
     public_base_url: process.env.PUBLIC_BASE_URL || null
   });
 });
@@ -208,16 +217,19 @@ app.post('/compose', requireApiKey, async (req, res) => {
   console.log(
     `[COMPOSE] New job (${normalized.format} format) — durations: [${durations.join(', ')}], ` +
     `music: ${normalized.audioUrl ? 'yes' : 'no'}, MusicStatus: ${normalized.musicStatus}, ` +
-    `env: ${normalized.environment}, publish: ${normalized.publishEnabled}`
+    `env: ${normalized.environment}, publish: ${normalized.publishEnabled}, ` +
+    `style_profile: ${normalized.styleProfile || 'scientific_clean'}`
   );
 
   try {
     const result = await compose({
-      videoUrls: normalized.videoUrls,
+      videoUrls:    normalized.videoUrls,
       durations,
-      voiceUrl:  normalized.voiceUrl,
-      audioUrl:  normalized.audioUrl || null,
-      outputDir: OUTPUT_DIR
+      voiceUrl:     normalized.voiceUrl,
+      audioUrl:     normalized.audioUrl || null,
+      outputDir:    OUTPUT_DIR,
+      styleProfile: normalized.styleProfile,
+      styleConfig:  normalized.styleConfig
     });
 
     const FinalVideoURL = `${PUBLIC_BASE_URL}/output/${result.filename}`;
@@ -237,7 +249,9 @@ app.post('/compose', requireApiKey, async (req, res) => {
       voice_duration_seconds: result.voice_duration_seconds,
       total_duration:         result.total_duration,
       clip_durations:         result.clip_durations,
-      effective_durations:    result.effective_durations
+      effective_durations:    result.effective_durations,
+      style_profile:          result.style_profile,
+      fallback_used:          result.fallback_used
     });
 
   } catch (err) {
@@ -258,7 +272,7 @@ app.use((_req, res) => {
 // ── Start ────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`[START] ffmpeg-worker v1.1.2 running on port ${PORT}`);
+  console.log(`[START] ffmpeg-worker v2.0.0 running on port ${PORT}`);
   console.log(`[START] Output dir: ${OUTPUT_DIR}`);
   console.log(`[START] Public base URL: ${PUBLIC_BASE_URL}`);
 });
