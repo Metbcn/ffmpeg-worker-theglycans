@@ -88,13 +88,17 @@ function clampMusicVolume(vol) {
 }
 
 // ── FASE 6A: CTA text escape for FFmpeg drawtext ─────────────────────────────
-// Removes emojis and chars that could break the drawtext filter parser.
+// The Docker image (node:20-slim) uses POSIX locale, not UTF-8.
+// FFmpeg drawtext renders non-ASCII chars (á, í, ñ…) as ? in that environment.
+// Fix: decompose accented chars via NFD, strip combining diacritics, then keep
+// only printable ASCII. "más" → "mas", "Sígueme" → "Sigueme".
 function escapeDrawtext(text) {
   if (!text || typeof text !== 'string') return '';
-  const safe = text
-    .replace(/[^ -~À-ɏ]/gu, '') // keep printable ASCII + Latin Extended
-    .trim()
-    .slice(0, 80);
+  const ascii = text
+    .normalize('NFD')                    // decompose: á → a + combining acute
+    .replace(/[̀-ͯ]/g, '')     // strip combining diacritics
+    .replace(/[^\x00-\x7F]/g, '');      // remove any remaining non-ASCII
+  const safe = ascii.replace(/[^ -~]/g, '').trim().slice(0, 80);
   if (!safe) return '';
   return safe
     .replace(/\\/g, '\\\\')
