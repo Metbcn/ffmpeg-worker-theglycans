@@ -141,8 +141,19 @@ function resolveEqParams(visual_identity) {
 // Only allow types that are stable in ffmpeg xfade; everything else → 'fade'.
 const SAFE_XFADE_TYPES = new Set(['fade', 'wipeleft', 'wiperight', 'smoothleft', 'smoothright']);
 
+// Semantic aliases from the N8N style catalog → real FFmpeg xfade types.
+// Without this, 5 of 6 style profiles silently fall back to 'fade'.
+const TRANSITION_ALIASES = {
+  'whip_cut':       'wipeleft',   // aggressive_hook: fast lateral wipe
+  'cross_dissolve': 'fade',       // premium_health:  smooth blend
+  'soft_dissolve':  'fade',       // emotional_story: gentle blend
+  'cut_dynamic':    'wiperight',  // dynamic_educational: dynamic wipe
+  'clean_cut':      'fade',       // minimal_viral: straight cut → safest fallback
+};
+
 function resolveTransitionType(type) {
-  return SAFE_XFADE_TYPES.has(type) ? type : 'fade';
+  if (SAFE_XFADE_TYPES.has(type)) return type;
+  return TRANSITION_ALIASES[type] ?? 'fade';
 }
 
 // Font file used for drawtext. DejaVu is installed in the Dockerfile.
