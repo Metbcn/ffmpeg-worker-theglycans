@@ -176,6 +176,7 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
 
     // ── 5. Build styled FFmpeg args; fall back to simple on any error ───────
     let usedFallback = false;
+    let fallbackReason = null;
     let ffmpegArgs;
 
     try {
@@ -185,6 +186,7 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
         subtitlesEnabled, subtitleMode, subtitleText
       });
     } catch (buildErr) {
+      fallbackReason = `filter_build: ${buildErr.message}`;
       console.warn(`[${jobId}] FALLBACK (filter build): ${buildErr.message}`);
       ffmpegArgs = buildSimpleFFmpegArgs({ jobDir, effectiveDurs, loopSegs, targetDuration, hasMusic: !!audioUrl, outputFile });
       usedFallback = true;
@@ -194,7 +196,8 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
       await runFFmpeg(jobId, ffmpegArgs);
     } catch (ffmpegErr) {
       if (usedFallback) throw ffmpegErr; // simple render also failed → propagate
-      console.warn(`[${jobId}] FALLBACK (FFmpeg error): ${ffmpegErr.message.slice(0, 120)}`);
+      fallbackReason = `ffmpeg_error: ${ffmpegErr.message.slice(0, 400)}`;
+      console.warn(`[${jobId}] FALLBACK (FFmpeg error): ${ffmpegErr.message.slice(0, 200)}`);
       const simpleArgs = buildSimpleFFmpegArgs({ jobDir, effectiveDurs, targetDuration, hasMusic: !!audioUrl, outputFile });
       await runFFmpeg(jobId, simpleArgs);
       usedFallback = true;
@@ -214,7 +217,8 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
       effective_durations:    effectiveDurs,
       total_duration:         targetDuration,
       style_profile:          profile,
-      fallback_used:          usedFallback
+      fallback_used:          usedFallback,
+      fallback_reason:        fallbackReason
     };
 
   } finally {
