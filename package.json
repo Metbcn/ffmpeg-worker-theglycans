@@ -1,6 +1,6 @@
 {
   "name": "ffmpeg-worker",
-  "version": "1.0.0",
+  "version": "2.0.1",
   "description": "FFmpeg composition worker for TheGlycans video pipeline",
   "main": "src/index.js",
   "scripts": {
