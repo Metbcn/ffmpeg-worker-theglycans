@@ -180,9 +180,10 @@ app.get('/health', (_req, res) => {
     timestamp: new Date().toISOString(),
     version: '2.0.1',
     public_base_url: process.env.PUBLIC_BASE_URL || null,
-    build_commit: '8ff8697',
+    build_commit: '641f884',
     drawtext_ascii_fix: true,
-    drawtext_sanitizer: 'ascii-normalized-v2'
+    drawtext_sanitizer: 'ascii-normalized-v2',
+    whisper_mode: true
   });
 });
 
