@@ -241,27 +241,19 @@ function subtitleDrawtext(prevLabel, nextLabel, safe, fontFile, fontSize, start,
   );
 }
 
-// Split word array into up to 2 lines and escape for FFmpeg drawtext.
-// Max 4 words per line; longer chunks get split at midpoint with \n.
+// Escape up to MAX_WORDS words for FFmpeg drawtext — single line only.
+// Multi-line via \n is avoided: in some FFmpeg/AVOptions configurations the
+// backslash is consumed as an escape prefix and only the bare 'n' is rendered.
 function formatSubtitleText(wordArr) {
-  const MAX_PER_LINE = 4;
-  if (wordArr.length <= MAX_PER_LINE) {
-    return escapeDrawtext(wordArr.join(' '));
-  }
-  const mid = Math.ceil(wordArr.length / 2);
-  const l1  = escapeDrawtext(wordArr.slice(0, mid).join(' '));
-  const l2  = escapeDrawtext(wordArr.slice(mid).join(' '));
-  if (!l1 && !l2) return '';
-  if (!l1) return l2;
-  if (!l2) return l1;
-  return l1 + '\\n' + l2; // FFmpeg drawtext newline escape
+  const MAX_WORDS = 7;
+  return escapeDrawtext(wordArr.slice(0, MAX_WORDS).join(' '));
 }
 
 // ── FASE 6D-LITE: Approximate subtitle filter chain ──────────────────────────
 // 6 words/chunk → max 2 lines, safe for 9:16 vertical format.
 // Positioned at y=h-text_h-360 (lower-middle, ~75% from top).
 function buildSubtitleFilters({ text, voiceDuration, fontFile, fontStyle, inputLabel }) {
-  const words = text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  const words = text.replace(/\\n/g, ' ').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
   if (words.length < 3) return { filterChain: '', outputLabel: inputLabel };
 
   const WORDS_PER_CHUNK = 6;
