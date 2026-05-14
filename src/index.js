@@ -108,6 +108,7 @@ function normalizePayload(body) {
       subtitlesEnabled: body.subtitles_enabled ?? false,
       subtitleMode:     body.subtitle_mode || 'approximate',
       subtitleText:     body.subtitle_text || '',
+      whisperSegments:  Array.isArray(body.whisper_segments) ? body.whisper_segments : null,
       format:           'new'
     };
   }
@@ -138,6 +139,7 @@ function normalizePayload(body) {
     subtitlesEnabled: false,
     subtitleMode:     'approximate',
     subtitleText:     '',
+    whisperSegments:  null,
     format:           'old'
   };
 }
@@ -241,7 +243,8 @@ app.post('/compose', requireApiKey, async (req, res) => {
       styleConfig:      normalized.styleConfig,
       subtitlesEnabled: normalized.subtitlesEnabled,
       subtitleMode:     normalized.subtitleMode,
-      subtitleText:     normalized.subtitleText
+      subtitleText:     normalized.subtitleText,
+      whisperSegments:  normalized.whisperSegments
     });
 
     const FinalVideoURL = `${PUBLIC_BASE_URL}/output/${result.filename}`;

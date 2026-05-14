@@ -67,7 +67,8 @@ function getDuration(filePath) {
 // styleConfig:  raw style_config object from the n8n payload (or null/undefined)
 
 async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, styleProfile, styleConfig,
-                          subtitlesEnabled = false, subtitleMode = 'approximate', subtitleText = '' }) {
+                          subtitlesEnabled = false, subtitleMode = 'approximate', subtitleText = '',
+                          whisperSegments = null }) {
   const jobId = uuidv4();
   const jobDir = path.join(TEMP_DIR, jobId);
   fs.mkdirSync(jobDir, { recursive: true });
@@ -183,7 +184,7 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
       ffmpegArgs = buildStyledFFmpegArgs({
         jobDir, effectiveDurs, measuredClipDurs, targetDuration,
         hasMusic: !!audioUrl, outputFile, style, loopSegs,
-        subtitlesEnabled, subtitleMode, subtitleText
+        subtitlesEnabled, subtitleMode, subtitleText, whisperSegments
       });
     } catch (buildErr) {
       fallbackReason = `filter_build: ${buildErr.message}`;
@@ -227,19 +228,47 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
   }
 }
 
+// ── Subtitle helpers ─────────────────────────────────────────────────────────
+
+// Shared drawtext style for both approximate and Whisper subtitle modes.
+// y=h-text_h-360 places subtitles at ~75% height (lower-middle safe zone).
+function subtitleDrawtext(prevLabel, nextLabel, safe, fontFile, fontSize, start, end) {
+  return (
+    `${prevLabel}drawtext=fontfile=${fontFile}:text='${safe}':fontsize=${fontSize}:` +
+    `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:` +
+    `x=(w-text_w)/2:y=h-text_h-360:` +
+    `enable='between(t,${start},${end})'${nextLabel}`
+  );
+}
+
+// Split word array into up to 2 lines and escape for FFmpeg drawtext.
+// Max 4 words per line; longer chunks get split at midpoint with \n.
+function formatSubtitleText(wordArr) {
+  const MAX_PER_LINE = 4;
+  if (wordArr.length <= MAX_PER_LINE) {
+    return escapeDrawtext(wordArr.join(' '));
+  }
+  const mid = Math.ceil(wordArr.length / 2);
+  const l1  = escapeDrawtext(wordArr.slice(0, mid).join(' '));
+  const l2  = escapeDrawtext(wordArr.slice(mid).join(' '));
+  if (!l1 && !l2) return '';
+  if (!l1) return l2;
+  if (!l2) return l1;
+  return l1 + '\\n' + l2; // FFmpeg drawtext newline escape
+}
+
 // ── FASE 6D-LITE: Approximate subtitle filter chain ──────────────────────────
-// Splits guion text into equal-duration chunks and renders each via drawtext.
-// Uses 10 words/chunk (max 15 chunks) to keep the filter chain manageable.
-// Positioned at y=h-text_h-220 so it never overlaps the CTA (at h-text_h-80).
+// 6 words/chunk → max 2 lines, safe for 9:16 vertical format.
+// Positioned at y=h-text_h-360 (lower-middle, ~75% from top).
 function buildSubtitleFilters({ text, voiceDuration, fontFile, fontStyle, inputLabel }) {
   const words = text.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
   if (words.length < 3) return { filterChain: '', outputLabel: inputLabel };
 
-  const WORDS_PER_CHUNK = 10;
-  const MAX_CHUNKS      = 15;
+  const WORDS_PER_CHUNK = 6;
+  const MAX_CHUNKS      = 25;
   const allChunks = [];
   for (let i = 0; i < words.length; i += WORDS_PER_CHUNK) {
-    allChunks.push(words.slice(i, i + WORDS_PER_CHUNK).join(' '));
+    allChunks.push(words.slice(i, i + WORDS_PER_CHUNK));
   }
   const chunks   = allChunks.slice(0, MAX_CHUNKS);
   const chunkDur = voiceDuration / chunks.length;
@@ -248,18 +277,42 @@ function buildSubtitleFilters({ text, voiceDuration, fontFile, fontStyle, inputL
   const parts = [];
   let prevLabel = inputLabel;
 
-  chunks.forEach((chunk, i) => {
-    const safe = escapeDrawtext(chunk);
+  chunks.forEach((wordArr, i) => {
+    const safe = formatSubtitleText(wordArr);
     if (!safe) return;
     const start     = parseFloat((i * chunkDur).toFixed(2));
     const end       = parseFloat(Math.min((i + 1) * chunkDur, voiceDuration).toFixed(2));
     const nextLabel = i === chunks.length - 1 ? '[vwithsubs]' : `[sub${i}]`;
-    parts.push(
-      `${prevLabel}drawtext=fontfile=${fontFile}:text='${safe}':fontsize=${fontSize}:` +
-      `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=10:` +
-      `x=(w-text_w)/2:y=h-text_h-220:` +
-      `enable='between(t,${start},${end})'${nextLabel}`
-    );
+    parts.push(subtitleDrawtext(prevLabel, nextLabel, safe, fontFile, fontSize, start, end));
+    prevLabel = nextLabel;
+  });
+
+  if (parts.length === 0) return { filterChain: '', outputLabel: inputLabel };
+  return { filterChain: '; ' + parts.join('; '), outputLabel: prevLabel };
+}
+
+// ── Whisper subtitle filter chain ────────────────────────────────────────────
+// Uses real Whisper timestamps (segments: [{start, end, text}]).
+function buildSubtitleFiltersFromSegments({ segments, fontFile, fontStyle, inputLabel }) {
+  const fontSize   = Math.max(34, (resolveFontSize(fontStyle) || 48) - 14);
+  const validSegs  = (segments || [])
+    .filter(s => s && typeof s.text === 'string' && s.text.trim() && s.end > s.start)
+    .slice(0, 25);
+
+  if (validSegs.length === 0) return { filterChain: '', outputLabel: inputLabel };
+
+  const parts = [];
+  let prevLabel = inputLabel;
+
+  validSegs.forEach((seg, i) => {
+    const wordArr = seg.text.trim().split(/\s+/).filter(Boolean);
+    if (wordArr.length === 0) return;
+    const safe      = formatSubtitleText(wordArr);
+    if (!safe) return;
+    const start     = parseFloat(seg.start.toFixed(2));
+    const end       = parseFloat(seg.end.toFixed(2));
+    const nextLabel = i === validSegs.length - 1 ? '[vwithsubs]' : `[sub${i}]`;
+    parts.push(subtitleDrawtext(prevLabel, nextLabel, safe, fontFile, fontSize, start, end));
     prevLabel = nextLabel;
   });
 
@@ -323,7 +376,7 @@ function buildSimpleFFmpegArgs({ jobDir, effectiveDurs, loopSegs = [], targetDur
 // ── Styled renderer (FASE 6A + 6B + 6C) ─────────────────────────────────────
 
 function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, targetDuration, hasMusic, outputFile, style, loopSegs = [],
-                                  subtitlesEnabled = false, subtitleMode = 'approximate', subtitleText = '' }) {
+                                  subtitlesEnabled = false, subtitleMode = 'approximate', subtitleText = '', whisperSegments = null }) {
   // ── FASE 6B: zoom multiplier ──────────────────────────────────────────────
   const zoomMult   = resolveZoom(style.motion_style.zoom_intensity);
   const applyZoom  = zoomMult > 1.005;
@@ -445,25 +498,40 @@ function buildStyledFFmpegArgs({ jobDir, effectiveDurs, measuredClipDurs, target
   let subFilterChain = '';
   let afterSubsLabel = afterLoopsLabel;
 
-  if (subtitlesEnabled && subtitleText && subtitleText.trim().length > 10) {
+  if (subtitlesEnabled) {
     try {
-      const subResult = buildSubtitleFilters({
-        text:          subtitleText,
-        voiceDuration: targetDuration,
-        fontFile:      FONT_FILE,
-        fontStyle:     style.subtitle_style.font_style,
-        inputLabel:    afterLoopsLabel
-      });
-      if (subResult.filterChain) {
+      const useWhisper = subtitleMode === 'whisper'
+        && Array.isArray(whisperSegments) && whisperSegments.length > 0;
+
+      let subResult;
+      if (useWhisper) {
+        subResult = buildSubtitleFiltersFromSegments({
+          segments:   whisperSegments,
+          fontFile:   FONT_FILE,
+          fontStyle:  style.subtitle_style.font_style,
+          inputLabel: afterLoopsLabel
+        });
+        console.log(`[STYLED] Subtitles (whisper): ${whisperSegments.length} segments → ${(subResult.filterChain.split('; ').length - 1)} filters`);
+      } else if (subtitleText && subtitleText.trim().length > 10) {
+        subResult = buildSubtitleFilters({
+          text:          subtitleText,
+          voiceDuration: targetDuration,
+          fontFile:      FONT_FILE,
+          fontStyle:     style.subtitle_style.font_style,
+          inputLabel:    afterLoopsLabel
+        });
+        console.log(`[STYLED] Subtitles (approx): ${subtitleText.trim().split(/\s+/).length} words → ${(subResult.filterChain.split('; ').length - 1)} chunks`);
+      }
+
+      if (subResult && subResult.filterChain) {
         subFilterChain = subResult.filterChain;
         afterSubsLabel = subResult.outputLabel;
-        console.log(`[STYLED] Subtitles: ${subtitleText.trim().split(/\s+/).length} words → ${subResult.filterChain.split('; ').length - 1} chunks over ${targetDuration.toFixed(1)}s`);
       }
     } catch (subErr) {
       console.warn(`[STYLED] Subtitle filter build failed: ${subErr.message} — skipping subtitles`);
     }
   } else {
-    console.log('[STYLED] Subtitles: disabled or no text');
+    console.log('[STYLED] Subtitles: disabled');
   }
 
   // ── FASE 6.1 — CTA text overlay (improved visibility) ────────────────────
