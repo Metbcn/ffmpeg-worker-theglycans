@@ -285,10 +285,13 @@ function buildSubtitleFilters({ text, voiceDuration, fontFile, fontStyle, inputL
 
 // ── Whisper subtitle filter chain ────────────────────────────────────────────
 // Uses real Whisper timestamps (segments: [{start, end, text}]).
+// Timestamps may arrive as strings from n8n — parseFloat(String()) coerces safely.
 function buildSubtitleFiltersFromSegments({ segments, fontFile, fontStyle, inputLabel }) {
   const fontSize   = Math.max(34, (resolveFontSize(fontStyle) || 48) - 14);
   const validSegs  = (segments || [])
-    .filter(s => s && typeof s.text === 'string' && s.text.trim() && s.end > s.start)
+    .filter(s => s && typeof s.text === 'string' && s.text.trim()
+              && !isNaN(parseFloat(s.start)) && !isNaN(parseFloat(s.end))
+              && parseFloat(s.end) > parseFloat(s.start))
     .slice(0, 25);
 
   if (validSegs.length === 0) return { filterChain: '', outputLabel: inputLabel };
@@ -301,8 +304,8 @@ function buildSubtitleFiltersFromSegments({ segments, fontFile, fontStyle, input
     if (wordArr.length === 0) return;
     const safe      = formatSubtitleText(wordArr);
     if (!safe) return;
-    const start     = parseFloat(seg.start.toFixed(2));
-    const end       = parseFloat(seg.end.toFixed(2));
+    const start     = parseFloat(parseFloat(String(seg.start)).toFixed(2));
+    const end       = parseFloat(parseFloat(String(seg.end)).toFixed(2));
     const nextLabel = i === validSegs.length - 1 ? '[vwithsubs]' : `[sub${i}]`;
     parts.push(subtitleDrawtext(prevLabel, nextLabel, safe, fontFile, fontSize, start, end));
     prevLabel = nextLabel;

@@ -178,13 +178,14 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     service: 'ffmpeg-worker',
     timestamp: new Date().toISOString(),
-    version: '2.0.2',
+    version: '2.0.3',
     public_base_url: process.env.PUBLIC_BASE_URL || null,
     build_commit: '641f884',
     drawtext_ascii_fix: true,
     drawtext_sanitizer: 'ascii-normalized-v2',
     whisper_mode: true,
-    subtitle_multiline_fix: true
+    subtitle_multiline_fix: true,
+    whisper_timestamp_coercion: true
   });
 });
 
@@ -289,7 +290,7 @@ app.use((_req, res) => {
 // ── Start ────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`[START] ffmpeg-worker v2.0.2 running on port ${PORT}`);
+  console.log(`[START] ffmpeg-worker v2.0.3 running on port ${PORT}`);
   console.log(`[START] Output dir: ${OUTPUT_DIR}`);
   console.log(`[START] Public base URL: ${PUBLIC_BASE_URL}`);
   console.log(`[START] drawtext sanitizer: ascii-normalized-v2`);
