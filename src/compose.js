@@ -302,13 +302,36 @@ function buildSubtitleFiltersFromSegments({ segments, fontFile, fontStyle, input
   validSegs.forEach((seg, i) => {
     const wordArr = seg.text.trim().split(/\s+/).filter(Boolean);
     if (wordArr.length === 0) return;
-    const safe      = formatSubtitleText(wordArr);
-    if (!safe) return;
-    const start     = parseFloat(parseFloat(String(seg.start)).toFixed(2));
-    const end       = parseFloat(parseFloat(String(seg.end)).toFixed(2));
-    const nextLabel = i === validSegs.length - 1 ? '[vwithsubs]' : `[sub${i}]`;
-    parts.push(subtitleDrawtext(prevLabel, nextLabel, safe, fontFile, fontSize, start, end));
-    prevLabel = nextLabel;
+    const safe1 = formatSubtitleText(wordArr.slice(0, 7));
+    if (!safe1) return;
+    const start    = parseFloat(parseFloat(String(seg.start)).toFixed(2));
+    const end      = parseFloat(parseFloat(String(seg.end)).toFixed(2));
+    const isLast   = i === validSegs.length - 1;
+    const outLabel = isLast ? '[vwithsubs]' : `[sub${i}]`;
+
+    const line2Arr = wordArr.slice(7, 14);
+    const safe2    = line2Arr.length > 0 ? formatSubtitleText(line2Arr) : '';
+
+    if (safe2) {
+      // Words 1-7 on upper line (y-420), words 8-14 on lower line (y-350).
+      // Two separate drawtext — no \n inside a single filter (causes stray 'n' bug).
+      const midLabel = `[sl${i}]`;
+      parts.push(
+        `${prevLabel}drawtext=fontfile=${fontFile}:text='${safe1}':fontsize=${fontSize}:` +
+        `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:` +
+        `x=(w-text_w)/2:y=h-text_h-420:` +
+        `enable='between(t,${start},${end})'${midLabel}`
+      );
+      parts.push(
+        `${midLabel}drawtext=fontfile=${fontFile}:text='${safe2}':fontsize=${fontSize}:` +
+        `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:` +
+        `x=(w-text_w)/2:y=h-text_h-350:` +
+        `enable='between(t,${start},${end})'${outLabel}`
+      );
+    } else {
+      parts.push(subtitleDrawtext(prevLabel, outLabel, safe1, fontFile, fontSize, start, end));
+    }
+    prevLabel = outLabel;
   });
 
   if (parts.length === 0) return { filterChain: '', outputLabel: inputLabel };
