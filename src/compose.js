@@ -235,7 +235,7 @@ async function compose({ videoUrls, durations, voiceUrl, audioUrl, outputDir, st
 function subtitleDrawtext(prevLabel, nextLabel, safe, fontFile, fontSize, start, end) {
   return (
     `${prevLabel}drawtext=fontfile=${fontFile}:text='${safe}':fontsize=${fontSize}:` +
-    `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:` +
+    `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:fix_bounds=1:` +
     `x=(w-text_w)/2:y=h-text_h-360:` +
     `enable='between(t,${start},${end})'${nextLabel}`
   );
@@ -245,7 +245,7 @@ function subtitleDrawtext(prevLabel, nextLabel, safe, fontFile, fontSize, start,
 // Multi-line via \n is avoided: in some FFmpeg/AVOptions configurations the
 // backslash is consumed as an escape prefix and only the bare 'n' is rendered.
 function formatSubtitleText(wordArr) {
-  const MAX_WORDS = 7;
+  const MAX_WORDS = 5;
   return escapeDrawtext(wordArr.slice(0, MAX_WORDS).join(' '));
 }
 
@@ -318,13 +318,13 @@ function buildSubtitleFiltersFromSegments({ segments, fontFile, fontStyle, input
       const midLabel = `[sl${i}]`;
       parts.push(
         `${prevLabel}drawtext=fontfile=${fontFile}:text='${safe1}':fontsize=${fontSize}:` +
-        `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:` +
+        `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:fix_bounds=1:` +
         `x=(w-text_w)/2:y=h-text_h-420:` +
         `enable='between(t,${start},${end})'${midLabel}`
       );
       parts.push(
         `${midLabel}drawtext=fontfile=${fontFile}:text='${safe2}':fontsize=${fontSize}:` +
-        `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:` +
+        `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:fix_bounds=1:` +
         `x=(w-text_w)/2:y=h-text_h-350:` +
         `enable='between(t,${start},${end})'${outLabel}`
       );

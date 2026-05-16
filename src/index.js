@@ -178,7 +178,7 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     service: 'ffmpeg-worker',
     timestamp: new Date().toISOString(),
-    version: '2.0.4',
+    version: '2.0.5',
     public_base_url: process.env.PUBLIC_BASE_URL || null,
     build_commit: '641f884',
     drawtext_ascii_fix: true,
@@ -186,7 +186,8 @@ app.get('/health', (_req, res) => {
     whisper_mode: true,
     subtitle_multiline_fix: true,
     whisper_timestamp_coercion: true,
-    subtitle_two_line_split: true
+    subtitle_two_line_split: true,
+    subtitle_fix_bounds: true
   });
 });
 
