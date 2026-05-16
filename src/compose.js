@@ -241,23 +241,22 @@ function subtitleDrawtext(prevLabel, nextLabel, safe, fontFile, fontSize, start,
   );
 }
 
-// Escape up to MAX_WORDS words for FFmpeg drawtext — single line only.
-// Multi-line via \n is avoided: in some FFmpeg/AVOptions configurations the
-// backslash is consumed as an escape prefix and only the bare 'n' is rendered.
+// Escape a word array for FFmpeg drawtext (single line, no newlines).
+// No internal truncation — caller must pass the exact slice to display.
 function formatSubtitleText(wordArr) {
-  const MAX_WORDS = 5;
-  return escapeDrawtext(wordArr.slice(0, MAX_WORDS).join(' '));
+  return escapeDrawtext(wordArr.join(' '));
 }
 
 // ── FASE 6D-LITE: Approximate subtitle filter chain ──────────────────────────
-// 6 words/chunk → max 2 lines, safe for 9:16 vertical format.
+// Splits the full voiceover text into 5-word chunks distributed evenly over
+// voiceDuration. No words are discarded (allChunks includes every word).
 // Positioned at y=h-text_h-360 (lower-middle, ~75% from top).
 function buildSubtitleFilters({ text, voiceDuration, fontFile, fontStyle, inputLabel }) {
   const words = text.replace(/\\n/g, ' ').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
   if (words.length < 3) return { filterChain: '', outputLabel: inputLabel };
 
-  const WORDS_PER_CHUNK = 6;
-  const MAX_CHUNKS      = 25;
+  const WORDS_PER_CHUNK = 5;
+  const MAX_CHUNKS      = 50;
   const allChunks = [];
   for (let i = 0; i < words.length; i += WORDS_PER_CHUNK) {
     allChunks.push(words.slice(i, i + WORDS_PER_CHUNK));
@@ -286,9 +285,13 @@ function buildSubtitleFilters({ text, voiceDuration, fontFile, fontStyle, inputL
 // ── Whisper subtitle filter chain ────────────────────────────────────────────
 // Uses real Whisper timestamps (segments: [{start, end, text}]).
 // Timestamps may arrive as strings from n8n — parseFloat(String()) coerces safely.
+//
+// Long segments (>10 words) are split into consecutive timed blocks so that no
+// words are silently discarded. Each block shows at most 2 lines of 5 words each.
+// The segment's time window is divided proportionally among its blocks.
 function buildSubtitleFiltersFromSegments({ segments, fontFile, fontStyle, inputLabel }) {
-  const fontSize   = Math.max(34, (resolveFontSize(fontStyle) || 48) - 14);
-  const validSegs  = (segments || [])
+  const fontSize  = Math.max(34, (resolveFontSize(fontStyle) || 48) - 14);
+  const validSegs = (segments || [])
     .filter(s => s && typeof s.text === 'string' && s.text.trim()
               && !isNaN(parseFloat(s.start)) && !isNaN(parseFloat(s.end))
               && parseFloat(s.end) > parseFloat(s.start))
@@ -296,40 +299,63 @@ function buildSubtitleFiltersFromSegments({ segments, fontFile, fontStyle, input
 
   if (validSegs.length === 0) return { filterChain: '', outputLabel: inputLabel };
 
-  const parts = [];
-  let prevLabel = inputLabel;
+  const WORDS_PER_LINE  = 5;
+  const WORDS_PER_BLOCK = WORDS_PER_LINE * 2; // 10 words → 2 lines per timed block
 
-  validSegs.forEach((seg, i) => {
+  // ── Phase 1: expand every segment into display blocks ────────────────────
+  // A segment with ≤10 words → 1 block. >10 words → multiple blocks with
+  // proportionally split timestamps. No words are discarded.
+  const displayBlocks = [];
+  validSegs.forEach(seg => {
     const wordArr = seg.text.trim().split(/\s+/).filter(Boolean);
     if (wordArr.length === 0) return;
-    const safe1 = formatSubtitleText(wordArr.slice(0, 7));
-    if (!safe1) return;
-    const start    = parseFloat(parseFloat(String(seg.start)).toFixed(2));
-    const end      = parseFloat(parseFloat(String(seg.end)).toFixed(2));
-    const isLast   = i === validSegs.length - 1;
-    const outLabel = isLast ? '[vwithsubs]' : `[sub${i}]`;
 
-    const line2Arr = wordArr.slice(7, 14);
-    const safe2    = line2Arr.length > 0 ? formatSubtitleText(line2Arr) : '';
+    const start  = parseFloat(parseFloat(String(seg.start)).toFixed(2));
+    const end    = parseFloat(parseFloat(String(seg.end)).toFixed(2));
+    const segDur = end - start;
+
+    const numBlocks = Math.ceil(wordArr.length / WORDS_PER_BLOCK);
+    const blockDur  = segDur / numBlocks;
+
+    for (let b = 0; b < numBlocks; b++) {
+      const bWords = wordArr.slice(b * WORDS_PER_BLOCK, (b + 1) * WORDS_PER_BLOCK);
+      const bStart = parseFloat((start + b       * blockDur).toFixed(2));
+      const bEnd   = parseFloat((start + (b + 1) * blockDur).toFixed(2));
+      const line1  = bWords.slice(0, WORDS_PER_LINE);
+      const line2  = bWords.slice(WORDS_PER_LINE);
+      const safe1  = formatSubtitleText(line1);
+      const safe2  = line2.length > 0 ? formatSubtitleText(line2) : '';
+      if (safe1) displayBlocks.push({ bStart, bEnd, safe1, safe2 });
+    }
+  });
+
+  if (displayBlocks.length === 0) return { filterChain: '', outputLabel: inputLabel };
+
+  // ── Phase 2: build drawtext filter chain from display blocks ─────────────
+  const parts   = [];
+  let prevLabel = inputLabel;
+
+  displayBlocks.forEach(({ bStart, bEnd, safe1, safe2 }, idx) => {
+    const isLast   = idx === displayBlocks.length - 1;
+    const outLabel = isLast ? '[vwithsubs]' : `[sub${idx}]`;
 
     if (safe2) {
-      // Words 1-7 on upper line (y-420), words 8-14 on lower line (y-350).
-      // Two separate drawtext — no \n inside a single filter (causes stray 'n' bug).
-      const midLabel = `[sl${i}]`;
+      // Two lines: upper (y-420) + lower (y-350). No \n inside drawtext.
+      const midLabel = `[sl${idx}]`;
       parts.push(
         `${prevLabel}drawtext=fontfile=${fontFile}:text='${safe1}':fontsize=${fontSize}:` +
         `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:fix_bounds=1:` +
         `x=(w-text_w)/2:y=h-text_h-420:` +
-        `enable='between(t,${start},${end})'${midLabel}`
+        `enable='between(t,${bStart},${bEnd})'${midLabel}`
       );
       parts.push(
         `${midLabel}drawtext=fontfile=${fontFile}:text='${safe2}':fontsize=${fontSize}:` +
         `fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=12:fix_bounds=1:` +
         `x=(w-text_w)/2:y=h-text_h-350:` +
-        `enable='between(t,${start},${end})'${outLabel}`
+        `enable='between(t,${bStart},${bEnd})'${outLabel}`
       );
     } else {
-      parts.push(subtitleDrawtext(prevLabel, outLabel, safe1, fontFile, fontSize, start, end));
+      parts.push(subtitleDrawtext(prevLabel, outLabel, safe1, fontFile, fontSize, bStart, bEnd));
     }
     prevLabel = outLabel;
   });
